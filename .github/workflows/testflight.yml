@@ -94,11 +94,12 @@ jobs:
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath "$RUNNER_TEMP/BylineTimes.xcarchive" \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$KEY_PATH" \
-            -authenticationKeyID "$KEY_ID" \
-            -authenticationKeyIssuerID "$ISSUER_ID" \
-            CURRENT_PROJECT_VERSION="${{ github.run_number }}"
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+          # The app is built unsigned here and signed for distribution in the next step.
+          # Signing at this stage would need a registered test device, which TestFlight does not.
 
       - name: Send to TestFlight
         run: |
