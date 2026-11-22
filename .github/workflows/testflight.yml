@@ -12,9 +12,6 @@ jobs:
   testflight:
     runs-on: macos-15
     timeout-minutes: 40
-    env:
-      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
     steps:
       - name: Check out the code
         uses: actions/checkout@v4
@@ -29,14 +26,65 @@ jobs:
 
       - name: Write the App Store Connect key
         env:
-          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          RAW_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          RAW_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          RAW_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
         run: |
-          if [ -z "$ASC_KEY_ID" ] || [ -z "$ASC_ISSUER_ID" ] || [ -z "$ASC_KEY_P8" ]; then
+          if [ -z "$RAW_KEY_ID" ] || [ -z "$RAW_ISSUER_ID" ] || [ -z "$RAW_KEY_P8" ]; then
             echo "::error::Add the ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_P8 secrets to this repository first."
             exit 1
           fi
+          # Remove stray spaces and line breaks from the two IDs, and Windows line endings from the key.
+          KEY_ID=$(printf '%s' "$RAW_KEY_ID" | tr -d '[:space:]')
+          ISSUER_ID=$(printf '%s' "$RAW_ISSUER_ID" | tr -d '[:space:]')
+          echo "::add-mask::$KEY_ID"
+          echo "::add-mask::$ISSUER_ID"
           mkdir -p "$RUNNER_TEMP/keys"
-          printf '%s\n' "$ASC_KEY_P8" > "$RUNNER_TEMP/keys/AuthKey_${ASC_KEY_ID}.p8"
+          KEY_PATH="$RUNNER_TEMP/keys/AuthKey_${KEY_ID}.p8"
+          printf '%s\n' "$RAW_KEY_P8" | tr -d '\r' > "$KEY_PATH"
+          echo "KEY_ID=$KEY_ID" >> "$GITHUB_ENV"
+          echo "ISSUER_ID=$ISSUER_ID" >> "$GITHUB_ENV"
+          echo "KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
+
+          # Shape checks. These print lengths only, never the values.
+          echo "Key ID length: ${#KEY_ID} (expected 10)"
+          echo "Issuer ID length: ${#ISSUER_ID} (expected 36)"
+          echo "Key file lines: $(wc -l < "$KEY_PATH" | tr -d ' ') (expected about 6)"
+          if ! head -n 1 "$KEY_PATH" | grep -q -- '-----BEGIN PRIVATE KEY-----'; then
+            echo "::error::ASC_KEY_P8 does not start with the BEGIN PRIVATE KEY line. Paste the whole .p8 file."
+            exit 1
+          fi
+          if ! openssl pkey -in "$KEY_PATH" -noout 2>/dev/null; then
+            echo "::error::ASC_KEY_P8 is not a readable private key. Paste the whole .p8 file again, unchanged."
+            exit 1
+          fi
+          echo "Key file is a valid private key."
+
+      - name: Check Apple accepts the key
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet pyjwt cryptography
+          "$RUNNER_TEMP/venv/bin/python" - <<'PY'
+          import os, sys, time, urllib.request, urllib.error
+          import jwt
+          key = open(os.environ["KEY_PATH"]).read()
+          now = int(time.time())
+          token = jwt.encode(
+              {"iss": os.environ["ISSUER_ID"], "iat": now, "exp": now + 600, "aud": "appstoreconnect-v1"},
+              key, algorithm="ES256", headers={"kid": os.environ["KEY_ID"]},
+          )
+          request = urllib.request.Request(
+              "https://api.appstoreconnect.apple.com/v1/apps?limit=1",
+              headers={"Authorization": "Bearer " + token},
+          )
+          try:
+              with urllib.request.urlopen(request) as response:
+                  print("Apple accepted the key: HTTP", response.status)
+          except urllib.error.HTTPError as error:
+              print("::error::Apple rejected the key: HTTP %s. Check that ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_P8 all come from the same key." % error.code)
+              print(error.read().decode()[:400])
+              sys.exit(1)
+          PY
 
       - name: Build the app
         run: |
@@ -47,9 +95,9 @@ jobs:
             -destination 'generic/platform=iOS' \
             -archivePath "$RUNNER_TEMP/BylineTimes.xcarchive" \
             -allowProvisioningUpdates \
-            -authenticationKeyPath "$RUNNER_TEMP/keys/AuthKey_${ASC_KEY_ID}.p8" \
-            -authenticationKeyID "$ASC_KEY_ID" \
-            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            -authenticationKeyPath "$KEY_PATH" \
+            -authenticationKeyID "$KEY_ID" \
+            -authenticationKeyIssuerID "$ISSUER_ID" \
             CURRENT_PROJECT_VERSION="${{ github.run_number }}"
 
       - name: Send to TestFlight
@@ -59,9 +107,9 @@ jobs:
             -exportOptionsPlist ExportOptions.plist \
             -exportPath "$RUNNER_TEMP/export" \
             -allowProvisioningUpdates \
-            -authenticationKeyPath "$RUNNER_TEMP/keys/AuthKey_${ASC_KEY_ID}.p8" \
-            -authenticationKeyID "$ASC_KEY_ID" \
-            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+            -authenticationKeyPath "$KEY_PATH" \
+            -authenticationKeyID "$KEY_ID" \
+            -authenticationKeyIssuerID "$ISSUER_ID"
 
       - name: Remove the key
         if: always()
